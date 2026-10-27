@@ -1,0 +1,12 @@
+[package]
+name = "pe-restore"
+version = "0.1.0"
+edition = "2024"
+description = "Turns a Parasite Eve PC port crash report into a save on memory card 1"
+
+[dependencies]
+# Chris's save editor from the port repo (save layout, CRC, memory card files).
+pe-save-editor = { path = "../ParasiteEveNative/fork-pr-crash/save-editor" }
+# Window and file/folder pickers, the same versions the save editor uses.
+eframe = "0.31"
+rfd = "0.15"
