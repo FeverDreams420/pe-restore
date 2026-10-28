@@ -3,6 +3,7 @@
 
 mod card;
 mod gui;
+mod mods;
 mod report;
 mod save;
 
