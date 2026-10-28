@@ -5,6 +5,7 @@ use pe_save_editor::crc::{SAVE_BLOCK_SIZE, SAVE_CRC_OFFSET, update_save_crc16};
 use pe_save_editor::save::{PeSaveSlot, RT_OFFSET};
 use pe_save_editor::tables::save_header_location_name;
 
+use crate::mods::{self, Layout, ModData, NamedRecord};
 use crate::report::{CrashReport, SAVE_DATA_LEN, SAVE_TAIL_OFFSET, SaveTail};
 
 /// Card header (magic, icon, palette) comes from a sample save of the save editor.
@@ -73,6 +74,49 @@ pub fn tail_warning(report: &CrashReport, from: &TailFrom) -> Option<String> {
     }
 }
 
+/// The mods' data the built save will hold, read to show it (the bytes are copied as they are),
+/// and where it comes from. None when it holds none.
+pub fn mods_in_save(report: &CrashReport, old_tail: Option<&[u8]>) -> Option<(TailFrom, ModData)> {
+    let from = tail_from(report, old_tail);
+    match (&report.save_tail, &from) {
+        (SaveTail::Data(tail), _) => Some((from, mods::read(tail, &report.mod_records))),
+        (_, TailFrom::OldSave) => {
+            // The report's names fit any save's records; its states describe the crash, not that save.
+            let names: Vec<NamedRecord> =
+                report.mod_records.iter().map(|n| NamedRecord { state: String::new(), ..n.clone() }).collect();
+            let mut data = mods::read(old_tail?, &names);
+            data.records.iter_mut().for_each(|r| r.state = None);
+            Some((from, data))
+        }
+        _ => None,
+    }
+}
+
+/// What the player should know about what the mods' data holds: damaged records, a newer
+/// format. Each such mod starts from its defaults in the game.
+pub fn mods_warning(data: &ModData) -> Option<String> {
+    let label = |r: &mods::Record| r.name.clone().unwrap_or_else(|| format!("record {:08X}", r.id));
+    match &data.layout {
+        Layout::Newer(format) => Some(format!(
+            "The mods' data is in a newer format ({format}) than this tool knows. It is kept as it is; \
+             a build that can't read it starts the mods from their defaults and keeps it for a newer build."
+        )),
+        Layout::Unreadable => {
+            Some("The mods' data can't be read. The game starts every mod from its defaults with this save.".into())
+        }
+        _ => {
+            let damaged: Vec<String> = data.records.iter().filter(|r| !r.crc_ok).map(label).collect();
+            (!damaged.is_empty()).then(|| {
+                format!(
+                    "Part of the mods' data was written over: {}. Those start from their defaults in the game; \
+                     the rest loads.",
+                    damaged.join(", ")
+                )
+            })
+        }
+    }
+}
+
 /// The save the game would have written in `slot_index` at the moment of the crash.
 /// `old_tail` (see `old_tail`) is the mods' data of the save already in that
 /// slot, used when the report has none.
@@ -138,7 +182,14 @@ mod tests {
     fn report() -> CrashReport {
         let mut save_data = TEMPLATE[RT_OFFSET..SAVE_CRC_OFFSET].to_vec();
         save_data[0x5E..0x60].copy_from_slice(&96i16.to_le_bytes());
-        CrashReport { room: 96, story_day: 4, save_data, save_tail: SaveTail::Missing, mods_on: false }
+        CrashReport {
+            room: 96,
+            story_day: 4,
+            save_data,
+            save_tail: SaveTail::Missing,
+            mods_on: false,
+            mod_records: Vec::new(),
+        }
     }
 
     #[test]
@@ -239,6 +290,74 @@ mod tests {
         assert!(warning.contains("will be missing") && warning.contains("story doors"), "{warning}");
         // A build without mods: nothing to say.
         assert_eq!(tail_warning(&report(), &tail_from(&report(), None)), None);
+    }
+
+    #[test]
+    fn shows_the_mods_data_the_save_will_hold() {
+        let loot = {
+            let mut d = vec![0u8; 36];
+            d[..4].copy_from_slice(&122u32.to_le_bytes());
+            d
+        };
+        let crash = mods::tests::container(&[("pe_economy.loot", 1, &loot)], &[0; 136]);
+        let names = vec![NamedRecord {
+            id: mods::fnv1a("pe_economy.loot"),
+            name: "pe_economy.loot".into(),
+            owner: Some("pe_economy".into()),
+            state: "live".into(),
+        }];
+        let r = CrashReport { save_tail: SaveTail::Data(crash.clone()), mods_on: true, mod_records: names, ..report() };
+        let (from, data) = mods_in_save(&r, None).unwrap();
+        assert_eq!(from, TailFrom::Report);
+        assert_eq!(mods::summary(&data.records[0]).unwrap(), "122 Junk");
+        assert_eq!(data.records[0].state.as_deref(), Some("live"));
+        assert_eq!(mods_warning(&data), None);
+        // Built as it is: the bytes go in unchanged.
+        assert_eq!(written_tail(&r, None, false), crash);
+
+        // No mods' data in the report: the slot's save's, named, without the crash's states.
+        let r2 = CrashReport { save_tail: SaveTail::NotTaken, ..r };
+        let old = old_save(&crash);
+        let (from, data) = mods_in_save(&r2, old_tail(&old)).unwrap();
+        assert_eq!(from, TailFrom::OldSave);
+        assert_eq!(data.records[0].name.as_deref(), Some("pe_economy.loot"));
+        assert_eq!(data.records[0].state, None);
+        assert!(mods_in_save(&report(), None).is_none());
+    }
+
+    /// With PE_CRASH_REPORT=<a crash-*.txt from a mods build with the host's records>: the
+    /// report's records are read, named and summed up, and the built save keeps them byte for byte.
+    #[test]
+    fn real_crash_report() {
+        let Ok(path) = std::env::var("PE_CRASH_REPORT") else { return };
+        let r = crate::report::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let (from, data) = mods_in_save(&r, None).expect("the report has mods' data");
+        assert_eq!(from, TailFrom::Report);
+        assert!(matches!(data.layout, Layout::Records { container_ok: true, .. }), "{:?}", data.layout);
+        assert_eq!(mods_warning(&data), None);
+        for rec in &data.records {
+            assert!(rec.crc_ok && rec.name.is_some() && rec.owner.is_some() && rec.state.is_some(), "{rec:?}");
+            println!(
+                "{} {} {:?} {:?}",
+                rec.owner.as_deref().unwrap(),
+                rec.name.as_deref().unwrap(),
+                mods::summary(rec),
+                rec.state
+            );
+        }
+        let SaveTail::Data(tail) = &r.save_tail else { unreachable!() };
+        assert_eq!(&written_tail(&r, None, false), tail);
+    }
+
+    #[test]
+    fn warns_about_damaged_or_newer_mods_data() {
+        let mut tail = mods::tests::container(&[("pe_qol.keys", 1, &[0u8; 68])], &[0; 136]);
+        tail[20 + 12] ^= 1;
+        let warning = mods_warning(&mods::read(&tail, &[])).unwrap();
+        assert!(warning.contains("pe_qol.keys") && warning.contains("defaults"), "{warning}");
+        tail[20 + 12] ^= 1;
+        tail[4] = 2;
+        assert!(mods_warning(&mods::read(&tail, &[])).unwrap().contains("newer format"));
     }
 
     #[test]

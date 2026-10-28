@@ -11,7 +11,7 @@ use eframe::egui::{
 use pe_save_editor::tables::{map_location_descriptive, save_header_location_name};
 
 use crate::report::{self, CrashReport};
-use crate::{card, save};
+use crate::{card, mods, save};
 
 /// Memory card 1 slot the save goes to (0-based).
 const SLOT: usize = 0;
@@ -159,6 +159,43 @@ fn banner(ui: &mut Ui, tone: Tone, add: impl FnOnce(&mut Ui)) {
                 ui.vertical(add);
             });
         });
+}
+
+/// The mods' data the save will hold: one row per record, by mod, with what it holds.
+fn mods_list(ui: &mut Ui, from: &save::TailFrom, data: &mods::ModData) {
+    let source = match from {
+        save::TailFrom::Report => "from the crash".to_string(),
+        save::TailFrom::OldSave => format!("kept from the save in slot {}", SLOT + 1),
+        save::TailFrom::Nothing => return,
+    };
+    let layout = match &data.layout {
+        mods::Layout::OldBlocks => " (an older layout: the game converts it when the save loads)",
+        _ => "",
+    };
+    banner(ui, Tone::Info, |ui| {
+        ui.label(RichText::new(format!("Mods' data in the new save, {source}{layout}")).strong());
+        if data.records.is_empty() {
+            ui.label(RichText::new("No records.").weak());
+            return;
+        }
+        egui::Grid::new("mods").num_columns(3).spacing([12.0, 3.0]).show(ui, |ui| {
+            let mut records: Vec<&mods::Record> = data.records.iter().collect();
+            records.sort_by(|a, b| (&a.owner, &a.name).cmp(&(&b.owner, &b.name)));
+            for r in records {
+                ui.label(r.owner.as_deref().map(mods::mod_label).unwrap_or_else(|| "Unknown mod".into()));
+                let what = mods::summary(r)
+                    .or_else(|| r.name.clone())
+                    .unwrap_or_else(|| format!("record {:08X}, {} bytes", r.id, r.data.len()));
+                ui.label(if r.crc_ok {
+                    RichText::new(what)
+                } else {
+                    RichText::new(format!("{what} (damaged)")).strong()
+                });
+                ui.label(RichText::new(r.state.clone().unwrap_or_default()).small().weak());
+                ui.end_row();
+            }
+        });
+    });
 }
 
 fn banner_text(ui: &mut Ui, tone: Tone, text: impl Into<String>) {
@@ -351,6 +388,12 @@ impl App {
         save::tail_warning(report, &save::tail_from(report, old))
     }
 
+    /// The mods' data the save will hold for the selected report, and where it comes from.
+    fn mods_in_save(&self) -> Option<(save::TailFrom, mods::ModData)> {
+        let report = self.selected_entry()?.report.as_ref().ok()?;
+        save::mods_in_save(report, self.slot_bytes.as_deref().and_then(save::old_tail))
+    }
+
     fn write(&mut self) {
         self.confirm_replace = false;
         self.message = Some(self.try_write().unwrap_or_else(Message::Failed));
@@ -364,7 +407,11 @@ impl App {
         // Read again now: the mods' data is kept from the slot's save as it is at this moment.
         let old_bytes = fs::read(dir.join(save::file_name(SLOT))).ok();
         let old = old_bytes.as_deref().and_then(save::old_tail);
-        let warning = save::tail_warning(report, &save::tail_from(report, old));
+        let mods_warning = save::mods_in_save(report, old).and_then(|(_, data)| save::mods_warning(&data));
+        let warning = match (save::tail_warning(report, &save::tail_from(report, old)), mods_warning) {
+            (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+            (a, b) => a.or(b),
+        };
         let mut slot = save::build(report, SLOT, old).map_err(|e| format!("Can't build the save: {e}"))?;
         if self.strong {
             save::apply_test_setup(&mut slot).map_err(|e| format!("Can't change the save: {e}"))?;
@@ -584,6 +631,14 @@ impl App {
             if let Some(warning) = self.tail_warning().filter(|_| !done) {
                 ui.add_space(4.0);
                 banner_text(ui, Tone::Warn, warning);
+            }
+            if let Some((from, data)) = self.mods_in_save().filter(|_| !done) {
+                ui.add_space(4.0);
+                mods_list(ui, &from, &data);
+                if let Some(warning) = save::mods_warning(&data) {
+                    ui.add_space(4.0);
+                    banner_text(ui, Tone::Warn, warning);
+                }
             }
 
             ui.add_space(10.0);

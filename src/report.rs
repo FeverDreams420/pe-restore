@@ -3,17 +3,21 @@
 use pe_save_editor::crc::{SAVE_BLOCK_SIZE, SAVE_CRC_OFFSET};
 use pe_save_editor::save::RT_OFFSET;
 
+use crate::mods::NamedRecord;
+
 const SAVE_DATA_HEADER: &str = "== Save data (save file bytes from 0x0100) ==";
 const SAVE_TAIL_HEADER: &str = "== Save tail (save file bytes from 0x1C90) ==";
 const OLD_STORY_HEADER: &str = "== Story progress";
+/// The Mods section's list of the snapshot's records (port builds with the host's records).
+const MOD_RECORDS_LINE: &str = "Mods' save data (the room snapshot): ";
 
 /// Number of save file bytes a report holds: 0x0100..0x1C8B (everything but
 /// the card header/icon in front and the CRC at the end).
 pub const SAVE_DATA_LEN: usize = SAVE_CRC_OFFSET - RT_OFFSET;
 
 /// The save's free tail after the CRC, where mods keep their per-save data
-/// (Junk, Catalog, key item pocket...). Its layout depends on the mods, so
-/// it is copied as it is, never read.
+/// (Junk, Catalog, key item pocket...). It is copied as it is; `mods` reads
+/// it only to show what it holds.
 pub const SAVE_TAIL_OFFSET: usize = SAVE_CRC_OFFSET + 4;
 pub const SAVE_TAIL_LEN: usize = SAVE_BLOCK_SIZE - SAVE_TAIL_OFFSET;
 
@@ -40,6 +44,8 @@ pub struct CrashReport {
     pub save_tail: SaveTail,
     /// The Mods section says "All mods on".
     pub mods_on: bool,
+    /// The records the Mods section names: every mod's, with its owner and state at the crash.
+    pub mod_records: Vec<NamedRecord>,
 }
 
 pub fn parse(text: &str) -> Result<CrashReport, String> {
@@ -76,7 +82,31 @@ pub fn parse(text: &str) -> Result<CrashReport, String> {
         return Err(format!("the save data says room {saved_room} but the Game line says room {room}."));
     }
 
-    Ok(CrashReport { room, story_day, save_data, save_tail, mods_on })
+    let mod_records = read_mod_records(&lines);
+
+    Ok(CrashReport { room, story_day, save_data, save_tail, mods_on, mod_records })
+}
+
+/// "  4EAF78D1 pe_qol.keys (pe_qol) v1, 68 bytes, live" lines after the Mods section's
+/// records line. A name the port didn't know reads "(unknown)" and is left out.
+fn read_mod_records(lines: &[&str]) -> Vec<NamedRecord> {
+    let Some(start) = lines.iter().position(|l| l.starts_with(MOD_RECORDS_LINE)) else { return Vec::new() };
+    let mut out = Vec::new();
+    for line in &lines[start + 1..] {
+        let Some(rest) = line.strip_prefix("  ") else { break };
+        let Some((hex, rest)) = rest.split_once(' ') else { continue };
+        let Some(id) = u32::from_str_radix(hex, 16).ok().filter(|_| hex.len() == 8) else { continue };
+        let Some((head, state)) = rest.split_once(" bytes, ") else { continue };
+        let Some((head, _version)) = head.rsplit_once(" v") else { continue };
+        let (name, owner) = match head.split_once(" (") {
+            Some((name, owner)) => (name, owner.strip_suffix(')').map(str::to_string)),
+            None => (head, None),
+        };
+        if name != "(unknown)" {
+            out.push(NamedRecord { id, name: name.into(), owner, state: state.trim().into() });
+        }
+    }
+    out
 }
 
 fn find_room(text: &str) -> Result<i16, String> {
@@ -275,6 +305,31 @@ mod tests {
         let text = report(96, 4, &save_data(96)).replacen("0100: 00", "0100: 0G", 1);
         let err = parse(&text).unwrap_err();
         assert!(err.contains("bad byte \"0G\""), "{err}");
+    }
+
+    #[test]
+    fn reads_the_mods_record_list() {
+        // As the port writes it: the records line, then one line per record, then the loaded save's line.
+        let list = "Mods' save data (the room snapshot): 3 record(s), 132 of 744 bytes, writer mod API 1 / save writer 1\r\n\
+                    \x20 loaded save: written by mod API 1 / save writer 1\r\n\
+                    \x20 4EAF78D1 pe_qol.keys (pe_qol) v1, 68 bytes, live\r\n\
+                    \x20 12345678 other_mod.state (other_mod) v3, 40 bytes, carried: mod off\r\n\
+                    \x20 0BADF00D (unknown) v1, 8 bytes, carried: mod not in this build\r\n";
+        let text = mods_report(&save_data(96), Some(&tail())).replace("All mods on\n", &format!("All mods on\n{list}"));
+        let records = parse(&text).unwrap().mod_records;
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0],
+            NamedRecord {
+                id: 0x4EAF78D1,
+                name: "pe_qol.keys".into(),
+                owner: Some("pe_qol".into()),
+                state: "live".into(),
+            }
+        );
+        assert_eq!(records[1].name, "other_mod.state");
+        assert_eq!(records[1].state, "carried: mod off");
+        assert!(parse(&mods_report(&save_data(96), Some(&tail()))).unwrap().mod_records.is_empty());
     }
 
     #[test]

@@ -28,6 +28,11 @@ You can also drag the game folder or a crash report onto the window (or onto
   from the crash report. If the report doesn't have it, the mods' data of the save
   already in slot 1 is kept, and the program warns you that it's from that save,
   not from the crash.
+- The program shows the mods' data the new save will hold, mod by mod: what each
+  record holds (Junk, pocketed key items, Mod Catalog unlocks...) and its state at the
+  crash. Records of other mods show by the names the crash report gives them. It warns
+  when part of that data was written over (those mods start from their defaults) or is in
+  a newer format than it knows. The bytes are always copied as they are.
 - If the game doesn't show the save, newer builds may be reading the memory card in
   `%APPDATA%\Parasite Eve\memory-cards\bu00` instead. The program tells you when that
   is the case.
