@@ -5,7 +5,7 @@ use pe_save_editor::crc::{SAVE_BLOCK_SIZE, SAVE_CRC_OFFSET, update_save_crc16};
 use pe_save_editor::save::{PeSaveSlot, RT_OFFSET};
 use pe_save_editor::tables::save_header_location_name;
 
-use crate::report::{CrashReport, SAVE_DATA_LEN};
+use crate::report::{CrashReport, SAVE_DATA_LEN, SAVE_TAIL_OFFSET, SaveTail};
 
 /// Card header (magic, icon, palette) comes from a sample save of the save editor.
 /// Only the first 0x100 bytes are used; the title is rewritten.
@@ -23,11 +23,71 @@ pub fn file_name(slot_index: usize) -> String {
     format!("BASLUS-006620000000{}", (b'A' + slot_index as u8) as char)
 }
 
+/// Where the built save's mod data (the tail after the CRC) comes from.
+#[derive(Debug, PartialEq)]
+pub enum TailFrom {
+    /// The report's Save tail section: the mods' data at the crash.
+    Report,
+    /// The save that was in the slot: the mods' data at that save.
+    OldSave,
+    /// Neither has any: the tail stays empty.
+    Nothing,
+}
+
+/// The tail of a save file already in the slot, when it is a good save that
+/// holds mod data.
+pub fn old_tail(bytes: &[u8]) -> Option<&[u8]> {
+    let good = bytes.len() == SAVE_BLOCK_SIZE
+        && PeSaveSlot::from_bytes(bytes, 0, String::new()).is_ok_and(|s| s.is_crc_valid());
+    let tail = bytes.get(SAVE_TAIL_OFFSET..)?;
+    (good && tail.iter().any(|&b| b != 0)).then_some(tail)
+}
+
+pub fn tail_from(report: &CrashReport, old_tail: Option<&[u8]>) -> TailFrom {
+    match (&report.save_tail, old_tail) {
+        (SaveTail::Data(_), _) => TailFrom::Report,
+        (_, Some(_)) => TailFrom::OldSave,
+        _ => TailFrom::Nothing,
+    }
+}
+
+/// What the player should know about the mods' data in the built save, if anything.
+pub fn tail_warning(report: &CrashReport, from: &TailFrom) -> Option<String> {
+    const MOD_DATA: &str = "the mods' data (Junk, Mod Catalog, Requisition, key item pocket, bag sort)";
+    let why = if report.save_tail == SaveTail::NotTaken {
+        "The report has no mod data: mod code was running at the crash."
+    } else {
+        "The report has no mod data."
+    };
+    match from {
+        TailFrom::Report => None,
+        TailFrom::OldSave => Some(format!(
+            "{why} So {MOD_DATA} is kept from the save that is in the slot now: it is from that save, \
+             not from the crash. Key items moved into or out of the pocket since then may be missing or doubled."
+        )),
+        TailFrom::Nothing if report.mods_on || report.save_tail == SaveTail::NotTaken => Some(format!(
+            "{why} There is no save with mod data in the slot to keep it from, so {MOD_DATA} will be missing. \
+             Key items that were in the pocket will be gone, which can block story doors."
+        )),
+        TailFrom::Nothing => None,
+    }
+}
+
 /// The save the game would have written in `slot_index` at the moment of the crash.
-pub fn build(report: &CrashReport, slot_index: usize) -> Result<PeSaveSlot, String> {
+/// `old_tail` (see `old_tail`) is the mods' data of the save already in that
+/// slot, used when the report has none.
+pub fn build(report: &CrashReport, slot_index: usize, old_tail: Option<&[u8]>) -> Result<PeSaveSlot, String> {
     let mut block = vec![0u8; SAVE_BLOCK_SIZE];
     block[..HEADER_LEN].copy_from_slice(&TEMPLATE[..HEADER_LEN]);
     block[RT_OFFSET..RT_OFFSET + SAVE_DATA_LEN].copy_from_slice(&report.save_data);
+    // Copied as it is: the layout belongs to the mods. The CRC below covers it.
+    let tail = match &report.save_tail {
+        SaveTail::Data(tail) => Some(tail.as_slice()),
+        _ => old_tail,
+    };
+    if let Some(tail) = tail {
+        block[SAVE_TAIL_OFFSET..].copy_from_slice(tail);
+    }
 
     let rt = &block[RT_OFFSET..];
     let play_time = i32::from_le_bytes(rt[0x08..0x0C].try_into().unwrap());
@@ -78,13 +138,13 @@ mod tests {
     fn report() -> CrashReport {
         let mut save_data = TEMPLATE[RT_OFFSET..SAVE_CRC_OFFSET].to_vec();
         save_data[0x5E..0x60].copy_from_slice(&96i16.to_le_bytes());
-        CrashReport { room: 96, story_day: 4, save_data }
+        CrashReport { room: 96, story_day: 4, save_data, save_tail: SaveTail::Missing, mods_on: false }
     }
 
     #[test]
     fn keeps_report_bytes_and_template_header() {
         let r = report();
-        let mut slot = build(&r, 0).unwrap();
+        let mut slot = build(&r, 0, None).unwrap();
         let bytes = to_bytes(&mut slot);
         assert_eq!(&bytes[RT_OFFSET..SAVE_CRC_OFFSET], &r.save_data[..]);
         assert_eq!(&bytes[..4], &TEMPLATE[..4]);
@@ -98,7 +158,7 @@ mod tests {
 
     #[test]
     fn title_names_slot_and_room() {
-        let mut slot = build(&report(), 2).unwrap();
+        let mut slot = build(&report(), 2, None).unwrap();
         let bytes = to_bytes(&mut slot);
         let title = decode_sjis_title(&bytes[TITLE]).1;
         assert!(title.starts_with("PE-03/"), "{title}");
@@ -108,7 +168,7 @@ mod tests {
 
     #[test]
     fn test_setup_keeps_items_and_adds_healing() {
-        let mut slot = build(&report(), 0).unwrap();
+        let mut slot = build(&report(), 0, None).unwrap();
         let before: Vec<i16> = slot.inventory_items.iter().copied().filter(|&v| v != 0).collect();
         apply_test_setup(&mut slot).unwrap();
         let bytes = to_bytes(&mut slot);
@@ -121,5 +181,73 @@ mod tests {
         }
         let healing = again.inventory_items.iter().filter(|&&v| v == FULL_RECOVER as i16).count();
         assert!(healing >= HEALING_ITEMS, "{healing}");
+    }
+
+    fn tail(seed: u8) -> Vec<u8> {
+        (0..crate::report::SAVE_TAIL_LEN).map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed)).collect()
+    }
+
+    /// The bytes of a good save in the slot whose tail is `tail`.
+    fn old_save(tail: &[u8]) -> Vec<u8> {
+        let mut bytes = TEMPLATE.to_vec();
+        bytes[SAVE_TAIL_OFFSET..].copy_from_slice(tail);
+        update_save_crc16(&mut bytes);
+        bytes
+    }
+
+    fn written_tail(r: &CrashReport, old: Option<&[u8]>, strong: bool) -> Vec<u8> {
+        let mut slot = build(r, 0, old).unwrap();
+        if strong {
+            apply_test_setup(&mut slot).unwrap();
+        }
+        let bytes = to_bytes(&mut slot);
+        let again = PeSaveSlot::from_bytes(&bytes, 0, file_name(0)).unwrap();
+        assert!(again.is_crc_valid());
+        bytes[SAVE_TAIL_OFFSET..].to_vec()
+    }
+
+    #[test]
+    fn copies_the_report_tail_over_the_old_one() {
+        let r = CrashReport { save_tail: SaveTail::Data(tail(1)), mods_on: true, ..report() };
+        let old = old_save(&tail(2));
+        assert_eq!(written_tail(&r, old_tail(&old), false), tail(1));
+        assert_eq!(written_tail(&r, old_tail(&old), true), tail(1));
+        assert_eq!(tail_from(&r, old_tail(&old)), TailFrom::Report);
+        assert_eq!(tail_warning(&r, &TailFrom::Report), None);
+    }
+
+    #[test]
+    fn keeps_the_old_tail_when_the_report_has_none() {
+        for save_tail in [SaveTail::NotTaken, SaveTail::Missing] {
+            let not_taken = save_tail == SaveTail::NotTaken;
+            let r = CrashReport { save_tail, mods_on: true, ..report() };
+            let old = old_save(&tail(2));
+            assert_eq!(written_tail(&r, old_tail(&old), false), tail(2));
+            let from = tail_from(&r, old_tail(&old));
+            assert_eq!(from, TailFrom::OldSave);
+            let warning = tail_warning(&r, &from).unwrap();
+            assert!(warning.contains("kept from the save that is in the slot now"), "{warning}");
+            assert_eq!(warning.contains("mod code was running"), not_taken, "{warning}");
+        }
+    }
+
+    #[test]
+    fn warns_when_mod_data_is_lost() {
+        let r = CrashReport { mods_on: true, ..report() };
+        assert!(written_tail(&r, None, false).iter().all(|&b| b == 0));
+        let warning = tail_warning(&r, &tail_from(&r, None)).unwrap();
+        assert!(warning.contains("will be missing") && warning.contains("story doors"), "{warning}");
+        // A build without mods: nothing to say.
+        assert_eq!(tail_warning(&report(), &tail_from(&report(), None)), None);
+    }
+
+    #[test]
+    fn old_tail_only_from_good_saves_with_mod_data() {
+        assert_eq!(old_tail(&old_save(&tail(2))), Some(tail(2).as_slice()));
+        assert_eq!(old_tail(&old_save(&vec![0; crate::report::SAVE_TAIL_LEN])), None);
+        let mut damaged = old_save(&tail(2));
+        damaged[0x200] ^= 1;
+        assert_eq!(old_tail(&damaged), None);
+        assert_eq!(old_tail(&damaged[..100]), None);
     }
 }

@@ -221,7 +221,7 @@ fn reports_dir(game_dir: &Path) -> PathBuf {
 }
 
 enum Message {
-    Written { title: String, path: PathBuf, backups: Vec<PathBuf> },
+    Written { title: String, path: PathBuf, backups: Vec<PathBuf>, warning: Option<String> },
     Failed(String),
     Cancelled,
 }
@@ -248,6 +248,8 @@ struct App {
     settings_card: Option<PathBuf>,
     /// Card titles of the files already in the slot.
     slot_saves: Vec<String>,
+    /// The normal save file in the slot, for its mod data (`save::old_tail`).
+    slot_bytes: Option<Vec<u8>>,
     confirm_replace: bool,
     message: Option<Message>,
 }
@@ -262,6 +264,7 @@ impl App {
             card_dir: None,
             settings_card: card::settings_card1(),
             slot_saves: Vec::new(),
+            slot_bytes: None,
             confirm_replace: false,
             message: None,
         };
@@ -338,6 +341,14 @@ impl App {
             Some(dir) => card::slot_files(dir, SLOT).iter().map(|f| card::describe(f)).collect(),
             None => Vec::new(),
         };
+        self.slot_bytes = self.card_dir.as_ref().and_then(|dir| fs::read(dir.join(save::file_name(SLOT))).ok());
+    }
+
+    /// The warning about the mods' data for the selected report, if any.
+    fn tail_warning(&self) -> Option<String> {
+        let report = self.selected_entry()?.report.as_ref().ok()?;
+        let old = self.slot_bytes.as_deref().and_then(save::old_tail);
+        save::tail_warning(report, &save::tail_from(report, old))
     }
 
     fn write(&mut self) {
@@ -350,14 +361,18 @@ impl App {
         let entry = self.selected_entry().ok_or("Pick a crash report first.")?;
         let report = entry.report.as_ref().map_err(|e| e.clone())?;
         let dir = self.card_dir.as_ref().ok_or("Choose the game folder first: the save goes to its memory card.")?;
-        let mut slot = save::build(report, SLOT).map_err(|e| format!("Can't build the save: {e}"))?;
+        // Read again now: the mods' data is kept from the slot's save as it is at this moment.
+        let old_bytes = fs::read(dir.join(save::file_name(SLOT))).ok();
+        let old = old_bytes.as_deref().and_then(save::old_tail);
+        let warning = save::tail_warning(report, &save::tail_from(report, old));
+        let mut slot = save::build(report, SLOT, old).map_err(|e| format!("Can't build the save: {e}"))?;
         if self.strong {
             save::apply_test_setup(&mut slot).map_err(|e| format!("Can't change the save: {e}"))?;
         }
         let bytes = save::to_bytes(&mut slot);
         let written =
             card::write_slot(dir, SLOT, &slot.filename, &bytes).map_err(|e| format!("Can't write the save: {e}"))?;
-        Ok(Message::Written { title: slot.header_title.clone(), path: written.path, backups: written.backups })
+        Ok(Message::Written { title: slot.header_title.clone(), path: written.path, backups: written.backups, warning })
     }
 
     fn apply(&mut self, action: Action) {
@@ -566,6 +581,11 @@ impl App {
                 );
             }
 
+            if let Some(warning) = self.tail_warning().filter(|_| !done) {
+                ui.add_space(4.0);
+                banner_text(ui, Tone::Warn, warning);
+            }
+
             ui.add_space(10.0);
             if self.confirm_replace {
                 banner(ui, Tone::Warn, |ui| {
@@ -593,18 +613,24 @@ impl App {
     fn message_ui(&self, ui: &mut Ui) {
         match &self.message {
             None => {}
-            Some(Message::Written { title, path, backups }) => banner(ui, Tone::Ok, |ui| {
-                ui.label(RichText::new(format!("Written to slot {}: \"{title}\"", SLOT + 1)).strong());
-                ui.add(egui::Label::new(RichText::new(path.display().to_string()).monospace()).wrap());
-                for backup in backups {
-                    ui.add(
-                        egui::Label::new(RichText::new(format!("Old save moved to {}", backup.display())).weak())
-                            .wrap(),
-                    );
+            Some(Message::Written { title, path, backups, warning }) => {
+                banner(ui, Tone::Ok, |ui| {
+                    ui.label(RichText::new(format!("Written to slot {}: \"{title}\"", SLOT + 1)).strong());
+                    ui.add(egui::Label::new(RichText::new(path.display().to_string()).monospace()).wrap());
+                    for backup in backups {
+                        ui.add(
+                            egui::Label::new(RichText::new(format!("Old save moved to {}", backup.display())).weak())
+                                .wrap(),
+                        );
+                    }
+                    ui.add_space(2.0);
+                    ui.label(format!("Start the game and load slot {} on memory card 1.", SLOT + 1));
+                });
+                if let Some(warning) = warning {
+                    ui.add_space(4.0);
+                    banner_text(ui, Tone::Warn, warning.as_str());
                 }
-                ui.add_space(2.0);
-                ui.label(format!("Start the game and load slot {} on memory card 1.", SLOT + 1));
-            }),
+            }
             Some(Message::Failed(text)) => banner_text(ui, Tone::Error, text),
             Some(Message::Cancelled) => banner_text(ui, Tone::Info, "Nothing written."),
         }

@@ -1,14 +1,32 @@
 //! Reads a crash-*.txt report from the PC port.
 
-use pe_save_editor::crc::SAVE_CRC_OFFSET;
+use pe_save_editor::crc::{SAVE_BLOCK_SIZE, SAVE_CRC_OFFSET};
 use pe_save_editor::save::RT_OFFSET;
 
 const SAVE_DATA_HEADER: &str = "== Save data (save file bytes from 0x0100) ==";
+const SAVE_TAIL_HEADER: &str = "== Save tail (save file bytes from 0x1C90) ==";
 const OLD_STORY_HEADER: &str = "== Story progress";
 
 /// Number of save file bytes a report holds: 0x0100..0x1C8B (everything but
 /// the card header/icon in front and the CRC at the end).
 pub const SAVE_DATA_LEN: usize = SAVE_CRC_OFFSET - RT_OFFSET;
+
+/// The save's free tail after the CRC, where mods keep their per-save data
+/// (Junk, Catalog, key item pocket...). Its layout depends on the mods, so
+/// it is copied as it is, never read.
+pub const SAVE_TAIL_OFFSET: usize = SAVE_CRC_OFFSET + 4;
+pub const SAVE_TAIL_LEN: usize = SAVE_BLOCK_SIZE - SAVE_TAIL_OFFSET;
+
+/// The report's Save tail section (builds with mods only).
+#[derive(Debug, PartialEq)]
+pub enum SaveTail {
+    /// File bytes 0x1C90..0x1FFF at the crash.
+    Data(Vec<u8>),
+    /// The section is there but empty: mod code was running at the crash.
+    NotTaken,
+    /// No section: a build without mods, or one older than the section.
+    Missing,
+}
 
 /// What the tool needs from a crash report.
 #[derive(Debug)]
@@ -19,6 +37,9 @@ pub struct CrashReport {
     pub story_day: i32,
     /// Save file bytes 0x0100..0x1C8B, in order.
     pub save_data: Vec<u8>,
+    pub save_tail: SaveTail,
+    /// The Mods section says "All mods on".
+    pub mods_on: bool,
 }
 
 pub fn parse(text: &str) -> Result<CrashReport, String> {
@@ -41,7 +62,13 @@ pub fn parse(text: &str) -> Result<CrashReport, String> {
             .into());
     }
 
-    let save_data = read_save_data(&lines[start + 1..])?;
+    let save_data = read_hex(&lines[start + 1..], RT_OFFSET, SAVE_DATA_LEN, "save data")?;
+    let save_tail = match lines.iter().position(|l| l.trim_end() == SAVE_TAIL_HEADER) {
+        None => SaveTail::Missing,
+        Some(i) if lines.get(i + 1).is_some_and(|l| l.starts_with("Not available")) => SaveTail::NotTaken,
+        Some(i) => SaveTail::Data(read_hex(&lines[i + 1..], SAVE_TAIL_OFFSET, SAVE_TAIL_LEN, "save tail")?),
+    };
+    let mods_on = lines.iter().any(|l| l.starts_with("Mod API ") && l.contains(", All mods on"));
 
     // Save_BuildHeader puts the current room in the save, so it must match.
     let saved_room = i16::from_le_bytes([save_data[0x5E], save_data[0x5F]]);
@@ -49,7 +76,7 @@ pub fn parse(text: &str) -> Result<CrashReport, String> {
         return Err(format!("the save data says room {saved_room} but the Game line says room {room}."));
     }
 
-    Ok(CrashReport { room, story_day, save_data })
+    Ok(CrashReport { room, story_day, save_data, save_tail, mods_on })
 }
 
 fn find_room(text: &str) -> Result<i16, String> {
@@ -75,35 +102,34 @@ fn leading_int<T: std::str::FromStr>(text: &str) -> Option<T> {
     text[..end].parse().ok()
 }
 
-/// Reads "OOOO: xx xx .." lines up to the next blank line or section.
-fn read_save_data(lines: &[&str]) -> Result<Vec<u8>, String> {
-    let mut data = Vec::with_capacity(SAVE_DATA_LEN);
+/// Reads "OOOO: xx xx .." lines from file offset `start` up to the next blank
+/// line or section; `what` names the section in errors.
+fn read_hex(lines: &[&str], start: usize, len: usize, what: &str) -> Result<Vec<u8>, String> {
+    let mut data = Vec::with_capacity(len);
     for line in lines {
         let line = line.trim_end();
         if line.is_empty() || line.starts_with("==") {
             break;
         }
-        let (offset, bytes) = line.split_once(": ").ok_or_else(|| format!("bad line in the save data: \"{line}\"."))?;
-        let offset =
-            usize::from_str_radix(offset, 16).map_err(|_| format!("bad offset in the save data: \"{line}\"."))?;
-        let expected = RT_OFFSET + data.len();
+        let (offset, bytes) = line.split_once(": ").ok_or_else(|| format!("bad line in the {what}: \"{line}\"."))?;
+        let offset = usize::from_str_radix(offset, 16).map_err(|_| format!("bad offset in the {what}: \"{line}\"."))?;
+        let expected = start + data.len();
         if offset != expected {
-            return Err(format!("the save data jumps from 0x{expected:04X} to 0x{offset:04X} (lines missing)."));
+            return Err(format!("the {what} jumps from 0x{expected:04X} to 0x{offset:04X} (lines missing)."));
         }
         for byte in bytes.split_whitespace() {
             let value = u8::from_str_radix(byte, 16)
                 .ok()
                 .filter(|_| byte.len() == 2)
-                .ok_or_else(|| format!("bad byte \"{byte}\" in the save data line {offset:04X}."))?;
+                .ok_or_else(|| format!("bad byte \"{byte}\" in the {what} line {offset:04X}."))?;
             data.push(value);
         }
     }
-    if data.len() != SAVE_DATA_LEN {
+    if data.len() != len {
         return Err(format!(
-            "the save data has {} bytes, expected {} (0x0100..0x{:04X}).",
+            "the {what} has {} bytes, expected {len} (0x{start:04X}..0x{:04X}).",
             data.len(),
-            SAVE_DATA_LEN,
-            SAVE_CRC_OFFSET - 1
+            start + len - 1
         ));
     }
     Ok(data)
@@ -122,11 +148,35 @@ mod tests {
              \n\
              {SAVE_DATA_HEADER}\n"
         );
+        text += &hex_lines(RT_OFFSET, data);
+        text + "\n== Log of this run ==\nlog line\n"
+    }
+
+    fn hex_lines(start: usize, data: &[u8]) -> String {
+        let mut text = String::new();
         for (i, chunk) in data.chunks(32).enumerate() {
             let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
-            text += &format!("{:04X}: {}\n", RT_OFFSET + i * 32, hex.join(" "));
+            text += &format!("{:04X}: {}\n", start + i * 32, hex.join(" "));
         }
-        text + "\n== Log of this run ==\nlog line\n"
+        text
+    }
+
+    /// The same report from a mods build: a Mods section, and a Save tail
+    /// section with `tail`, or one saying it was not taken.
+    fn mods_report(data: &[u8], tail: Option<&[u8]>) -> String {
+        let text = report(96, 4, data).replace(
+            &format!("\n{SAVE_DATA_HEADER}"),
+            &format!("== Mods ==\nMod API 1, mod host started, All mods on\n\n{SAVE_DATA_HEADER}"),
+        );
+        let section = match tail {
+            Some(tail) => hex_lines(SAVE_TAIL_OFFSET, tail),
+            None => "Not available: mod code was running at the crash, so the mods' save data was not taken.\n".into(),
+        };
+        text.replace("\n== Log of this run ==", &format!("\n{SAVE_TAIL_HEADER}\n{section}\n== Log of this run =="))
+    }
+
+    fn tail() -> Vec<u8> {
+        (0..SAVE_TAIL_LEN).map(|i| (i * 7) as u8).collect()
     }
 
     fn save_data(room: i16) -> Vec<u8> {
@@ -142,6 +192,41 @@ mod tests {
         assert_eq!(parsed.room, 96);
         assert_eq!(parsed.story_day, 4);
         assert_eq!(parsed.save_data, data);
+    }
+
+    #[test]
+    fn reports_without_mods_have_no_tail() {
+        let parsed = parse(&report(96, 4, &save_data(96))).unwrap();
+        assert_eq!(parsed.save_tail, SaveTail::Missing);
+        assert!(!parsed.mods_on);
+    }
+
+    #[test]
+    fn reads_the_save_tail() {
+        let parsed = parse(&mods_report(&save_data(96), Some(&tail()))).unwrap();
+        assert_eq!(parsed.save_tail, SaveTail::Data(tail()));
+        assert!(parsed.mods_on);
+        assert_eq!(parsed.save_data, save_data(96));
+    }
+
+    #[test]
+    fn reads_a_tail_that_was_not_taken() {
+        let text = mods_report(&save_data(96), None).replace('\n', "\r\n");
+        assert_eq!(parse(&text).unwrap().save_tail, SaveTail::NotTaken);
+    }
+
+    #[test]
+    fn refuses_a_cut_off_tail() {
+        let text = mods_report(&save_data(96), Some(&tail()[..SAVE_TAIL_LEN - 16]));
+        let err = parse(&text).unwrap_err();
+        assert!(err.contains("the save tail has 864 bytes, expected 880"), "{err}");
+    }
+
+    #[test]
+    fn mods_off_is_not_mods_on() {
+        let text = mods_report(&save_data(96), Some(&tail()))
+            .replace("All mods on", "All mods off (mods did not touch the game)");
+        assert!(!parse(&text).unwrap().mods_on);
     }
 
     #[test]
