@@ -1,6 +1,6 @@
 [package]
 name = "pe-restore"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Turns a Parasite Eve PC port crash report into a save on memory card 1"
 

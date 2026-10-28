@@ -24,6 +24,10 @@ You can also drag the game folder or a crash report onto the window (or onto
   `pe-restore-backups` folder next to `bu00`. Nothing is ever deleted.
 - Crash reports from older builds of the port don't have the full save in them
   and can't be used. Make a new one with a newer build.
+- Mods: the save keeps the mods' data (Junk, Mod Catalog, key item pocket and so on)
+  from the crash report. If the report doesn't have it, the mods' data of the save
+  already in slot 1 is kept, and the program warns you that it's from that save,
+  not from the crash.
 - If the game doesn't show the save, newer builds may be reading the memory card in
   `%APPDATA%\Parasite Eve\memory-cards\bu00` instead. The program tells you when that
   is the case.
