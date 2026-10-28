@@ -18,11 +18,15 @@ pub fn card1_in(game_dir: &Path) -> PathBuf {
     if cards.is_dir() { cards } else { game_dir.join("bu00") }
 }
 
-/// The settings-folder card 1 of newer port builds (Host_CardPath in main.c),
-/// when that build has already imported the `bu00` next to its exe: from then
-/// on the game reads this card, not the one in the game folder.
+/// The settings-folder card 1 of port builds from 0.6 on (Host_CardPath in
+/// main.c), when that build has already imported the `bu00` next to its exe:
+/// from then on the game reads this card, not the one in the game folder.
 pub fn settings_card1() -> Option<PathBuf> {
-    let cards = config_dir().ok()?.join("memory-cards");
+    settings_card1_in(&config_dir().ok()?)
+}
+
+fn settings_card1_in(config_dir: &Path) -> Option<PathBuf> {
+    let cards = config_dir.join("memory-cards");
     cards.join(".legacy-imported").is_file().then(|| cards.join("bu00"))
 }
 
@@ -208,6 +212,16 @@ mod tests {
         fs::remove_dir_all(game.join("memory-cards")).unwrap();
         assert_eq!(card1_in(&game), game.join("bu00"));
         let _ = fs::remove_dir_all(&game);
+    }
+
+    #[test]
+    fn settings_card_only_once_the_game_imported() {
+        let bu00 = temp_card();
+        let config = bu00.parent().unwrap().parent().unwrap().to_path_buf();
+        assert_eq!(settings_card1_in(&config), None);
+        fs::write(config.join("memory-cards").join(".legacy-imported"), "").unwrap();
+        assert_eq!(settings_card1_in(&config), Some(bu00.clone()));
+        cleanup(&bu00);
     }
 
     #[test]

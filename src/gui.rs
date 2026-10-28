@@ -242,10 +242,12 @@ struct App {
     reports: Vec<Entry>,
     selected: Option<usize>,
     strong: bool,
-    /// Card 1 inside the game folder.
+    /// Card 1 the game reads: the settings-folder one once 0.6 or newer has
+    /// moved to it, else the one inside the game folder.
     card_dir: Option<PathBuf>,
-    /// Card 1 in the settings folder, when a newer port build reads that one.
-    settings_card: Option<PathBuf>,
+    /// Card 1 inside the game folder when the save goes to the settings-folder
+    /// card: builds older than 0.6 still read this one.
+    game_folder_card: Option<PathBuf>,
     /// Card titles of the files already in the slot.
     slot_saves: Vec<String>,
     /// The normal save file in the slot, for its mod data (`save::old_tail`).
@@ -262,7 +264,7 @@ impl App {
             selected: None,
             strong: false,
             card_dir: None,
-            settings_card: card::settings_card1(),
+            game_folder_card: None,
             slot_saves: Vec::new(),
             slot_bytes: None,
             confirm_replace: false,
@@ -290,7 +292,18 @@ impl App {
 
     /// Re-reads the reports and the card slot from disk.
     fn rescan(&mut self) {
-        self.card_dir = self.game_dir.as_deref().map(card::card1_in);
+        // Looked up again each time: starting the game in between can move the card.
+        let game_folder_card = self.game_dir.as_deref().map(card::card1_in);
+        match card::settings_card1().filter(|_| game_folder_card.is_some()) {
+            Some(settings) => {
+                self.card_dir = Some(settings);
+                self.game_folder_card = game_folder_card;
+            }
+            None => {
+                self.card_dir = game_folder_card;
+                self.game_folder_card = None;
+            }
+        }
         self.scan_reports();
         self.refresh_slot();
     }
@@ -360,7 +373,7 @@ impl App {
     fn try_write(&self) -> Result<Message, String> {
         let entry = self.selected_entry().ok_or("Pick a crash report first.")?;
         let report = entry.report.as_ref().map_err(|e| e.clone())?;
-        let dir = self.card_dir.as_ref().ok_or("Choose the game folder first: the save goes to its memory card.")?;
+        let dir = self.card_dir.as_ref().ok_or("Choose the game folder first.")?;
         // Read again now: the mods' data is kept from the slot's save as it is at this moment.
         let old_bytes = fs::read(dir.join(save::file_name(SLOT))).ok();
         let old = old_bytes.as_deref().and_then(save::old_tail);
@@ -525,7 +538,11 @@ impl App {
                 return;
             }
             let Some(dir) = &self.card_dir else {
-                banner_text(ui, Tone::Warn, "Choose the game folder: the save goes to the memory card in it.");
+                banner_text(
+                    ui,
+                    Tone::Warn,
+                    "Choose the game folder first: the program finds the game's memory card from it.",
+                );
                 return;
             };
 
@@ -575,15 +592,16 @@ impl App {
                 ui.end_row();
             });
 
-            if let Some(other) = &self.settings_card {
+            if let Some(old) = &self.game_folder_card {
                 ui.add_space(4.0);
                 banner_text(
                     ui,
                     Tone::Info,
                     format!(
-                        "Newer builds of the port copy the game folder's bu00 once into {} and use that card \
-                         from then on. If the game doesn't show the save, it's reading that card instead.",
-                        other.display()
+                        "The port (0.6 and newer) copied the game folder's card into the settings folder once \
+                         and reads that card from then on, so the save goes there. Builds older than 0.6 read \
+                         {} instead.",
+                        old.display()
                     ),
                 );
             }

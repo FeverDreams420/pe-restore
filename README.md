@@ -32,9 +32,11 @@ You can also drag the game folder or a crash report onto the window (or onto
   from the crash report. If the report doesn't have it, the mods' data of the save
   already in slot 1 is kept, and the program warns you that it's from that save,
   not from the crash.
-- If the game doesn't show the save, newer builds may be reading the memory card in
-  `%APPDATA%\Parasite Eve\memory-cards\bu00` instead. The program tells you when that
-  is the case.
+- From 0.6 on, the game copies the memory cards in its folder once into
+  `%APPDATA%\Parasite Eve\memory-cards` and reads them there from then on. Once that
+  has happened, the save goes to `%APPDATA%\Parasite Eve\memory-cards\bu00` (backups in
+  `pe-restore-backups` next to it), and the program says so. Builds older than 0.6
+  still read the card in the game folder.
 
 ## Building
 
