@@ -22,7 +22,11 @@ You can also drag the game folder or a crash report onto the window (or onto
 
 - If slot 1 already has a save, it asks first. The old save is moved to a
   `pe-restore-backups` folder next to `bu00`. Nothing is ever deleted.
-- Crash reports from older builds of the port don't have the full save in them
+- Newer builds of the port keep a full copy of the save each time a room starts,
+  and the crash report holds that copy. The save you get puts you at the start of
+  the room where the game crashed, with everything as it was when you walked in.
+  Reports from a bit older builds hold the save from the moment of the crash instead.
+- Crash reports from much older builds of the port don't have the full save in them
   and can't be used. Make a new one with a newer build.
 - Mods: the save keeps the mods' data (Junk, Mod Catalog, key item pocket and so on)
   from the crash report. If the report doesn't have it, the mods' data of the save
@@ -33,9 +37,11 @@ You can also drag the game folder or a crash report onto the window (or onto
   crash. Records of other mods show by the names the crash report gives them. It warns
   when part of that data was written over (those mods start from their defaults) or is in
   a newer format than it knows. The bytes are always copied as they are.
-- If the game doesn't show the save, newer builds may be reading the memory card in
-  `%APPDATA%\Parasite Eve\memory-cards\bu00` instead. The program tells you when that
-  is the case.
+- From 0.6 on, the game copies the memory cards in its folder once into
+  `%APPDATA%\Parasite Eve\memory-cards` and reads them there from then on. Once that
+  has happened, the save goes to `%APPDATA%\Parasite Eve\memory-cards\bu00` (backups in
+  `pe-restore-backups` next to it), and the program says so. Builds older than 0.6
+  still read the card in the game folder.
 
 ## Building
 
