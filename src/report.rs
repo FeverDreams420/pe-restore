@@ -6,6 +6,10 @@ use pe_save_editor::save::RT_OFFSET;
 const SAVE_DATA_HEADER: &str = "== Save data (save file bytes from 0x0100) ==";
 const SAVE_TAIL_HEADER: &str = "== Save tail (save file bytes from 0x1C90) ==";
 const OLD_STORY_HEADER: &str = "== Story progress";
+/// Newer builds take the save data whole when each room starts and write that
+/// copy, with this section in front of it.
+const SNAPSHOT_HEADER: &str = "== Room snapshot ==";
+const SNAPSHOT_TAKEN: &str = "Taken when room ";
 
 /// Number of save file bytes a report holds: 0x0100..0x1C8B (everything but
 /// the card header/icon in front and the CRC at the end).
@@ -22,7 +26,7 @@ pub const SAVE_TAIL_LEN: usize = SAVE_BLOCK_SIZE - SAVE_TAIL_OFFSET;
 pub enum SaveTail {
     /// File bytes 0x1C90..0x1FFF at the crash.
     Data(Vec<u8>),
-    /// The section is there but empty: mod code was running at the crash.
+    /// The section is there but empty: mod code was running when it was taken.
     NotTaken,
     /// No section: a build without mods, or one older than the section.
     Missing,
@@ -31,10 +35,14 @@ pub enum SaveTail {
 /// What the tool needs from a crash report.
 #[derive(Debug)]
 pub struct CrashReport {
-    /// "Game: room N".
+    /// The save data's room: the room snapshot's, else "Game: room N".
     pub room: i16,
-    /// "story day S" from the Story line; -1 means no game was loaded.
+    /// The room snapshot's story day, else "story day S" from the Story line;
+    /// -1 means no game was loaded.
     pub story_day: i32,
+    /// Room snapshot: the save data is from the start of the room, this many
+    /// seconds before the crash. None: an older build, data from the crash itself.
+    pub seconds_before: Option<u32>,
     /// Save file bytes 0x0100..0x1C8B, in order.
     pub save_data: Vec<u8>,
     pub save_tail: SaveTail,
@@ -43,9 +51,13 @@ pub struct CrashReport {
 }
 
 pub fn parse(text: &str) -> Result<CrashReport, String> {
-    let room = find_room(text)?;
+    let mut room = find_room(text)?;
 
     let lines: Vec<&str> = text.lines().collect();
+    let snapshot = match lines.iter().position(|l| l.trim_end() == SNAPSHOT_HEADER) {
+        None => None,
+        Some(i) => Some(read_snapshot(lines.get(i + 1).copied().unwrap_or(""))?),
+    };
     let Some(start) = lines.iter().position(|l| l.trim_end() == SAVE_DATA_HEADER) else {
         if lines.iter().any(|l| l.starts_with(OLD_STORY_HEADER)) {
             return Err("this report was made by an older build: it only has the story \
@@ -55,7 +67,11 @@ pub fn parse(text: &str) -> Result<CrashReport, String> {
         return Err("this report has no \"== Save data ==\" section.".into());
     };
 
-    let story_day = find_story_day(text)?;
+    let mut story_day = find_story_day(text)?;
+    if let Some(s) = &snapshot {
+        room = s.room;
+        story_day = s.story_day;
+    }
     if story_day < 0 {
         return Err("the game crashed before a save was loaded (title screen), \
                     so there is no story progress to restore."
@@ -73,10 +89,33 @@ pub fn parse(text: &str) -> Result<CrashReport, String> {
     // Save_BuildHeader puts the current room in the save, so it must match.
     let saved_room = i16::from_le_bytes([save_data[0x5E], save_data[0x5F]]);
     if saved_room != room {
-        return Err(format!("the save data says room {saved_room} but the Game line says room {room}."));
+        let line = if snapshot.is_some() { "Room snapshot" } else { "Game line" };
+        return Err(format!("the save data says room {saved_room} but the {line} says room {room}."));
     }
 
-    Ok(CrashReport { room, story_day, save_data, save_tail, mods_on })
+    let seconds_before = snapshot.map(|s| s.seconds_before);
+    Ok(CrashReport { room, story_day, seconds_before, save_data, save_tail, mods_on })
+}
+
+struct Snapshot {
+    room: i16,
+    story_day: i32,
+    seconds_before: u32,
+}
+
+/// "Taken when room 96 started, story day 4, 41 seconds before the crash. ..."
+fn read_snapshot(line: &str) -> Result<Snapshot, String> {
+    if line.starts_with("None") {
+        return Err("the game crashed before any room had started, so there is no save data to restore.".into());
+    }
+    let bad = || format!("can't read the Room snapshot line \"{}\".", line.trim_end());
+    let rest = line.strip_prefix(SNAPSHOT_TAKEN).ok_or_else(bad)?;
+    let room = leading_int(rest).ok_or_else(bad)?;
+    let rest = rest.split_once(", story day ").ok_or_else(bad)?.1;
+    let story_day = leading_int(rest).ok_or_else(bad)?;
+    let rest = rest.split_once(", ").ok_or_else(bad)?.1;
+    let seconds_before = leading_int(rest).ok_or_else(bad)?;
+    Ok(Snapshot { room, story_day, seconds_before })
 }
 
 fn find_room(text: &str) -> Result<i16, String> {
@@ -275,6 +314,58 @@ mod tests {
         let text = report(96, 4, &save_data(96)).replacen("0100: 00", "0100: 0G", 1);
         let err = parse(&text).unwrap_err();
         assert!(err.contains("bad byte \"0G\""), "{err}");
+    }
+
+    /// A newer build's report: the save data comes from the start of room
+    /// `room`, after Aya walked on to room 5 and the day moved on.
+    fn snapshot_report(room: i16, story_day: i32, data: &[u8]) -> String {
+        report(5, 6, data).replace(
+            &format!("\n{SAVE_DATA_HEADER}"),
+            &format!(
+                "{SNAPSHOT_HEADER}\nTaken when room {room} started, story day {story_day}, 41 seconds before \
+                 the crash. The save data below is all from that moment.\n\n{SAVE_DATA_HEADER}"
+            ),
+        )
+    }
+
+    #[test]
+    fn reads_a_room_snapshot() {
+        let text = snapshot_report(96, 4, &save_data(96)).replace('\n', "\r\n");
+        let parsed = parse(&text).unwrap();
+        assert_eq!((parsed.room, parsed.story_day, parsed.seconds_before), (96, 4, Some(41)));
+        assert_eq!(parsed.save_data, save_data(96));
+    }
+
+    #[test]
+    fn older_reports_have_no_snapshot() {
+        assert_eq!(parse(&report(96, 4, &save_data(96))).unwrap().seconds_before, None);
+    }
+
+    #[test]
+    fn refuses_a_snapshot_room_that_does_not_match_the_save() {
+        let err = parse(&snapshot_report(97, 4, &save_data(96))).unwrap_err();
+        assert!(err.contains("the Room snapshot says room 97"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_title_screen_snapshot() {
+        let err = parse(&snapshot_report(0, -1, &save_data(0))).unwrap_err();
+        assert!(err.contains("title screen"), "{err}");
+    }
+
+    #[test]
+    fn refuses_reports_from_before_any_room() {
+        let text = "== What happened ==\nGame: room -1, disc 1\nStory: story day -1 (next -1)\n\n\
+                    == Room snapshot ==\nNone: no room had started yet, so there is no save data.\n";
+        let err = parse(text).unwrap_err();
+        assert!(err.contains("before any room had started"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_bad_snapshot_line() {
+        let text = snapshot_report(96, 4, &save_data(96)).replace("story day 4,", "day 4,");
+        let err = parse(&text).unwrap_err();
+        assert!(err.contains("can't read the Room snapshot line"), "{err}");
     }
 
     #[test]

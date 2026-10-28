@@ -26,7 +26,8 @@ pub fn file_name(slot_index: usize) -> String {
 /// Where the built save's mod data (the tail after the CRC) comes from.
 #[derive(Debug, PartialEq)]
 pub enum TailFrom {
-    /// The report's Save tail section: the mods' data at the crash.
+    /// The report's Save tail section: the mods' data at the start of the room
+    /// (newer builds) or at the crash.
     Report,
     /// The save that was in the slot: the mods' data at that save.
     OldSave,
@@ -55,7 +56,7 @@ pub fn tail_from(report: &CrashReport, old_tail: Option<&[u8]>) -> TailFrom {
 pub fn tail_warning(report: &CrashReport, from: &TailFrom) -> Option<String> {
     const MOD_DATA: &str = "the mods' data (Junk, Mod Catalog, Requisition, key item pocket, bag sort)";
     let why = if report.save_tail == SaveTail::NotTaken {
-        "The report has no mod data: mod code was running at the crash."
+        "The report has no mod data: mod code was running when it was taken."
     } else {
         "The report has no mod data."
     };
@@ -73,7 +74,8 @@ pub fn tail_warning(report: &CrashReport, from: &TailFrom) -> Option<String> {
     }
 }
 
-/// The save the game would have written in `slot_index` at the moment of the crash.
+/// The save the game would have written in `slot_index` at the start of the crash room
+/// (newer builds) or at the moment of the crash (older ones).
 /// `old_tail` (see `old_tail`) is the mods' data of the save already in that
 /// slot, used when the report has none.
 pub fn build(report: &CrashReport, slot_index: usize, old_tail: Option<&[u8]>) -> Result<PeSaveSlot, String> {
@@ -138,7 +140,14 @@ mod tests {
     fn report() -> CrashReport {
         let mut save_data = TEMPLATE[RT_OFFSET..SAVE_CRC_OFFSET].to_vec();
         save_data[0x5E..0x60].copy_from_slice(&96i16.to_le_bytes());
-        CrashReport { room: 96, story_day: 4, save_data, save_tail: SaveTail::Missing, mods_on: false }
+        CrashReport {
+            room: 96,
+            story_day: 4,
+            seconds_before: None,
+            save_data,
+            save_tail: SaveTail::Missing,
+            mods_on: false,
+        }
     }
 
     #[test]

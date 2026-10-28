@@ -507,6 +507,13 @@ impl App {
                 ),
                 Ok(_) => {}
             }
+            if let Ok(CrashReport { seconds_before: Some(s), .. }) = &entry.report {
+                banner_text(
+                    ui,
+                    Tone::Info,
+                    format!("The save is from the start of this room, {s} seconds before the crash."),
+                );
+            }
         });
     }
 

@@ -22,7 +22,11 @@ You can also drag the game folder or a crash report onto the window (or onto
 
 - If slot 1 already has a save, it asks first. The old save is moved to a
   `pe-restore-backups` folder next to `bu00`. Nothing is ever deleted.
-- Crash reports from older builds of the port don't have the full save in them
+- Newer builds of the port keep a full copy of the save each time a room starts,
+  and the crash report holds that copy. The save you get puts you at the start of
+  the room where the game crashed, with everything as it was when you walked in.
+  Reports from a bit older builds hold the save from the moment of the crash instead.
+- Crash reports from much older builds of the port don't have the full save in them
   and can't be used. Make a new one with a newer build.
 - Mods: the save keeps the mods' data (Junk, Mod Catalog, key item pocket and so on)
   from the crash report. If the report doesn't have it, the mods' data of the save
