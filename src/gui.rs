@@ -164,7 +164,7 @@ fn banner(ui: &mut Ui, tone: Tone, add: impl FnOnce(&mut Ui)) {
 /// The mods' data the save will hold: one row per record, by mod, with what it holds.
 fn mods_list(ui: &mut Ui, from: &save::TailFrom, data: &mods::ModData) {
     let source = match from {
-        save::TailFrom::Report => "from the crash".to_string(),
+        save::TailFrom::Report => "from the crash report".to_string(),
         save::TailFrom::OldSave => format!("kept from the save in slot {}", SLOT + 1),
         save::TailFrom::Nothing => return,
     };

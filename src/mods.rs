@@ -38,7 +38,7 @@ pub struct Record {
     pub data: Vec<u8>,
     /// Its own CRC matches (old fixed blocks: always true).
     pub crc_ok: bool,
-    /// What the report says about it at the crash ("live", "carried: mod off" ...).
+    /// What the report says about it in the crash report ("live", "carried: mod off" ...).
     pub state: Option<String>,
 }
 
@@ -197,26 +197,32 @@ fn read_unnamed(tail: &[u8]) -> ModData {
     ModData { layout: Layout::Records { container_ok, api, writer }, records }
 }
 
-/// What a PE Enhancements record holds, in a few words; None for other mods' records.
+/// What a PE Enhancements record holds, in a few words; None for other mods' records, damaged
+/// ones, layouts newer than this tool knows and records too short for their layout.
 pub fn summary(r: &Record) -> Option<String> {
+    if !r.crc_ok || r.version > 1 {
+        return None;
+    }
     let body = if r.version == 0 { r.data.get(16..)? } else { &r.data[..] };
+    let get16 = |b: &[u8], at: usize| b.get(at..at + 2).map(|s| u16_at(s, 0));
+    let get32 = |b: &[u8], at: usize| b.get(at..at + 4).map(|s| u32_at(s, 0));
     let name = r.name.as_deref()?;
     Some(match name {
         "pe_economy.loot" => {
-            let junk = if r.version == 0 { u32_at(&r.data, 8) } else { u32_at(&r.data, 0) };
+            let junk = if r.version == 0 { get32(&r.data, 8)? } else { get32(&r.data, 0)? };
             format!("{junk} Junk")
         }
         "pe_economy.catalog" => {
-            let (gun, armor) = (u32_at(body, 0).count_ones(), u32_at(body, 4).count_ones());
+            let (gun, armor) = (get32(body, 0)?.count_ones(), get32(body, 4)?.count_ones());
             format!("{gun} gun and {armor} armor effects unlocked, {} to rebuild", body.get(8)?)
         }
-        "pe_economy.shop" => format!("{} Tools bought", u16_at(body, 0)),
+        "pe_economy.shop" => format!("{} Tools bought", get16(body, 0)?),
         "pe_qol.keys" => match pocketed_keys(r).len() {
             0 => "no key items pocketed".into(),
             1 => "1 key item pocketed".into(),
             n => format!("{n} key items pocketed"),
         },
-        "pe_qol.sort" => if u32_at(body, 0) == 1 { "bag sort: Auto" } else { "bag sort: Manual" }.into(),
+        "pe_qol.sort" => if get32(body, 0)? == 1 { "bag sort: Auto" } else { "bag sort: Manual" }.into(),
         _ => return None,
     })
 }
@@ -368,5 +374,20 @@ pub mod tests {
         let mut newer = container(&[], &[0; 136]);
         newer[4] = 2;
         assert_eq!(read(&newer, &[]).layout, Layout::Newer(2));
+    }
+
+    #[test]
+    fn no_summary_for_damaged_short_or_newer_records() {
+        // The loot record's size written over to 2: its CRC fails and its body is too short.
+        let mut tail = container(&[("pe_economy.loot", 1, &loot(5))], &[0; 136]);
+        tail[HEADER_LEN + 6] = 2;
+        let r = &read(&tail, &[]).records[0];
+        assert!(!r.crc_ok);
+        assert_eq!(summary(r), None);
+        // Short but intact, and a layout newer than this tool knows.
+        for (version, data) in [(1, vec![1u8, 2]), (2, loot(5))] {
+            let tail = container(&[("pe_economy.loot", version, &data)], &[0; 136]);
+            assert_eq!(summary(&read(&tail, &[]).records[0]), None);
+        }
     }
 }

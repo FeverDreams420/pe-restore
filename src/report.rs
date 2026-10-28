@@ -52,7 +52,7 @@ pub struct CrashReport {
     pub save_tail: SaveTail,
     /// The Mods section says "All mods on".
     pub mods_on: bool,
-    /// The records the Mods section names: every mod's, with its owner and state at the crash.
+    /// The records the Mods section names: every mod's, with its owner and state in the report.
     pub mod_records: Vec<NamedRecord>,
 }
 

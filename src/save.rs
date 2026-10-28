@@ -82,7 +82,7 @@ pub fn mods_in_save(report: &CrashReport, old_tail: Option<&[u8]>) -> Option<(Ta
     match (&report.save_tail, &from) {
         (SaveTail::Data(tail), _) => Some((from, mods::read(tail, &report.mod_records))),
         (_, TailFrom::OldSave) => {
-            // The report's names fit any save's records; its states describe the crash, not that save.
+            // The report's names fit any save's records; its states describe the report's data, not that save.
             let names: Vec<NamedRecord> =
                 report.mod_records.iter().map(|n| NamedRecord { state: String::new(), ..n.clone() }).collect();
             let mut data = mods::read(old_tail?, &names);
